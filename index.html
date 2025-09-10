@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Sistema Escolar</title>
 <style>
-body { font-family: Arial, sans-serif; margin: 20px; padding: 20px; }
-input, textarea, select { display:block; margin: 10px 0; width: 100%; max-width:400px; }
+body { font-family: Arial; margin: 20px; padding: 20px; }
+input, textarea { display:block; margin: 10px 0; width: 100%; max-width:400px; }
 button { margin-top:10px; }
 .card { border: 1px solid #ccc; padding: 10px; margin-top: 10px; }
 </style>
@@ -14,15 +14,11 @@ button { margin-top:10px; }
 <body>
 <h1>Sistema Escolar</h1>
 
-<h2>Cadastro</h2>
+<h2>Cadastro Aluno</h2>
 <input type="text" id="cad_nome" placeholder="Nome">
 <input type="email" id="cad_email" placeholder="Email">
 <input type="password" id="cad_senha" placeholder="Senha">
-<select id="cad_tipo">
-  <option value="aluno">Aluno</option>
-  <option value="professor">Professor</option>
-</select>
-<input type="number" id="cad_turma" placeholder="ID Turma (opcional)">
+<input type="number" id="cad_turma" placeholder="ID Turma">
 <button onclick="cadastro()">Cadastrar</button>
 
 <h2>Login</h2>
@@ -45,8 +41,7 @@ async function cadastro(){
             nome: document.getElementById('cad_nome').value,
             email: document.getElementById('cad_email').value,
             senha: document.getElementById('cad_senha').value,
-            tipo: document.getElementById('cad_tipo').value,
-            id_turma: document.getElementById('cad_turma').value || null
+            id_turma: document.getElementById('cad_turma').value
         })
     });
     alert((await res.json()).message);
