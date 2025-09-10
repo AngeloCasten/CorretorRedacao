@@ -1,130 +1,158 @@
-from flask import Flask, request, jsonify, session
-from flask_sqlalchemy import SQLAlchemy
-from flask_cors import CORS
+from flask import Flask, render_template, request, redirect, url_for, session
 from werkzeug.security import generate_password_hash, check_password_hash
+import psycopg2
 import os
-from datetime import datetime
 
 app = Flask(__name__)
-CORS(app)
-app.secret_key = os.environ.get("SECRET_KEY", "troque-isto")
+app.secret_key = os.environ.get("SECRET_KEY", "supersecretkey")
 
-app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL")
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-db = SQLAlchemy(app)
+# Conexão com o PostgreSQL
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# --- MODELOS ---
-class Turma(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    nome = db.Column(db.String(100), nullable=False)
+def get_db_connection():
+    conn = psycopg2.connect(DATABASE_URL)
+    return conn
 
-class Usuario(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    nome = db.Column(db.String(200), nullable=False)
-    email = db.Column(db.String(200), unique=True, nullable=False)
-    senha_hash = db.Column(db.String(200), nullable=False)
-    tipo = db.Column(db.String(20), nullable=False)  # aluno ou professor
-    id_turma = db.Column(db.Integer, db.ForeignKey('turma.id'), nullable=True)
+# Criar tabelas se não existirem
+def init_db():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS usuario (
+        id SERIAL PRIMARY KEY,
+        nome VARCHAR(100) NOT NULL,
+        email VARCHAR(100) UNIQUE NOT NULL,
+        senha_hash VARCHAR(255) NOT NULL,
+        tipo VARCHAR(20) NOT NULL
+    );
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS turma (
+        id SERIAL PRIMARY KEY,
+        nome VARCHAR(50) NOT NULL
+    );
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS tema (
+        id SERIAL PRIMARY KEY,
+        titulo VARCHAR(100) NOT NULL,
+        descricao TEXT
+    );
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS redacao (
+        id SERIAL PRIMARY KEY,
+        usuario_id INTEGER REFERENCES usuario(id),
+        tema_id INTEGER REFERENCES tema(id),
+        texto TEXT NOT NULL,
+        nota NUMERIC(5,2),
+        avaliacao TEXT,
+        criado_em TIMESTAMP DEFAULT NOW()
+    );
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
 
-class Tema(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    titulo = db.Column(db.String(200), nullable=False)
-    descricao = db.Column(db.Text, nullable=True)
-    id_turma = db.Column(db.Integer, db.ForeignKey('turma.id'), nullable=False)
+init_db()
 
-class Redacao(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    id_aluno = db.Column(db.Integer, db.ForeignKey('usuario.id'), nullable=False)
-    id_tema = db.Column(db.Integer, db.ForeignKey('tema.id'), nullable=False)
-    texto = db.Column(db.Text, nullable=False)
-    nota = db.Column(db.Float, nullable=True)
-    avaliacao = db.Column(db.Text, nullable=True)
-    enviado_em = db.Column(db.DateTime, default=datetime.utcnow)
+# Rotas
+@app.route("/")
+def index():
+    if "user_id" in session:
+        return redirect(url_for("dashboard"))
+    return render_template("index.html")
 
-with app.app_context():
-    db.create_all()
-
-# --- ROTAS ---
-
-@app.route("/cadastro", methods=["POST"])
-def cadastro():
-    data = request.json
-    nome = data.get("nome")
-    email = data.get("email")
-    senha = data.get("senha")
-    tipo = data.get("tipo")
-    id_turma = data.get("id_turma")  # opcional para professores
-    if not nome or not email or not senha or not tipo:
-        return jsonify({"error": "Todos os campos obrigatórios"}), 400
-    if Usuario.query.filter_by(email=email).first():
-        return jsonify({"error": "Email já cadastrado"}), 400
-    u = Usuario(nome=nome, email=email, senha_hash=generate_password_hash(senha), tipo=tipo, id_turma=id_turma)
-    db.session.add(u)
-    db.session.commit()
-    return jsonify({"message": "Cadastro realizado com sucesso"})
-
-@app.route("/login", methods=["POST"])
+@app.route("/login", methods=["GET", "POST"])
 def login():
-    data = request.json
-    email = data.get("email")
-    senha = data.get("senha")
-    u = Usuario.query.filter_by(email=email).first()
-    if not u or not check_password_hash(u.senha_hash, senha):
-        return jsonify({"error": "Credenciais inválidas"}), 401
-    session["user_id"] = u.id
-    session["tipo"] = u.tipo
-    return jsonify({"message": "Login realizado", "tipo": u.tipo, "id": u.id})
+    if request.method == "POST":
+        email = request.form["email"]
+        senha = request.form["senha"]
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id, senha_hash, tipo, nome FROM usuario WHERE email = %s", (email,))
+        user = cur.fetchone()
+        cur.close()
+        conn.close()
+        if user and check_password_hash(user[1], senha):
+            session["user_id"] = user[0]
+            session["user_name"] = user[3]
+            session["user_tipo"] = user[2]
+            return redirect(url_for("dashboard"))
+        return "Usuário ou senha incorretos"
+    return render_template("login.html")
 
-@app.route("/temas", methods=["GET"])
-def listar_temas():
-    user_id = session.get("user_id")
-    tipo = session.get("tipo")
-    if not user_id: return jsonify({"error":"Não logado"}),401
-    if tipo=="aluno":
-        u = Usuario.query.get(user_id)
-        temas = Tema.query.filter_by(id_turma=u.id_turma).all()
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("index"))
+
+@app.route("/dashboard")
+def dashboard():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db_connection()
+    cur = conn.cursor()
+    # Alunos veem seus temas e redações
+    if session["user_tipo"] == "aluno":
+        cur.execute("SELECT * FROM tema")
+        temas = cur.fetchall()
+        cur.execute("SELECT r.id, t.titulo, r.texto, r.nota, r.avaliacao FROM redacao r JOIN tema t ON r.tema_id = t.id WHERE r.usuario_id = %s", (session["user_id"],))
+        redacoes = cur.fetchall()
+        cur.close()
+        conn.close()
+        return render_template("dashboard_aluno.html", temas=temas, redacoes=redacoes)
+    # Professores veem tudo
     else:
-        temas = Tema.query.all()
-    return jsonify([{"id": t.id, "titulo": t.titulo, "descricao": t.descricao} for t in temas])
+        cur.execute("SELECT r.id, u.nome, t.titulo, r.texto, r.nota, r.avaliacao FROM redacao r JOIN tema t ON r.tema_id = t.id JOIN usuario u ON r.usuario_id = u.id")
+        redacoes = cur.fetchall()
+        cur.execute("SELECT * FROM tema")
+        temas = cur.fetchall()
+        cur.close()
+        conn.close()
+        return render_template("dashboard_prof.html", redacoes=redacoes, temas=temas)
 
-@app.route("/redacao/enviar", methods=["POST"])
+@app.route("/enviar_redacao", methods=["POST"])
 def enviar_redacao():
-    user_id = session.get("user_id")
-    tipo = session.get("tipo")
-    if not user_id or tipo!="aluno": return jsonify({"error":"Somente alunos"}),401
-    data = request.json
-    id_tema = data.get("id_tema")
-    texto = data.get("texto")
-    if not id_tema or not texto: return jsonify({"error":"Campos obrigatórios"}),400
-    r = Redacao(id_aluno=user_id, id_tema=id_tema, texto=texto)
-    db.session.add(r)
-    db.session.commit()
-    return jsonify({"message":"Redação enviada"})
+    if "user_id" not in session or session["user_tipo"] != "aluno":
+        return redirect(url_for("login"))
+    tema_id = request.form["tema_id"]
+    texto = request.form["texto"]
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO redacao (usuario_id, tema_id, texto) VALUES (%s, %s, %s)", (session["user_id"], tema_id, texto))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return redirect(url_for("dashboard"))
 
-@app.route("/redacoes", methods=["GET"])
-def listar_redacoes():
-    user_id = session.get("user_id")
-    tipo = session.get("tipo")
-    if not user_id: return jsonify({"error":"Não logado"}),401
-    if tipo=="aluno":
-        redacoes = Redacao.query.filter_by(id_aluno=user_id).all()
-    else:
-        redacoes = Redacao.query.all()
-    return jsonify([{"id":r.id,"id_aluno":r.id_aluno,"id_tema":r.id_tema,"texto":r.texto,"nota":r.nota,"avaliacao":r.avaliacao} for r in redacoes])
+@app.route("/avaliar_redacao/<int:redacao_id>", methods=["POST"])
+def avaliar_redacao(redacao_id):
+    if "user_id" not in session or session["user_tipo"] != "professor":
+        return redirect(url_for("login"))
+    nota = request.form["nota"]
+    avaliacao = request.form["avaliacao"]
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE redacao SET nota=%s, avaliacao=%s WHERE id=%s", (nota, avaliacao, redacao_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return redirect(url_for("dashboard"))
 
-@app.route("/redacao/avaliar/<int:id_redacao>", methods=["POST"])
-def avaliar_redacao(id_redacao):
-    user_id = session.get("user_id")
-    tipo = session.get("tipo")
-    if not user_id or tipo!="professor": return jsonify({"error":"Somente professores"}),401
-    data = request.json
-    nota = data.get("nota")
-    avaliacao = data.get("avaliacao")
-    r = Redacao.query.get_or_404(id_redacao)
-    r.nota = float(nota) if nota else None
-    r.avaliacao = avaliacao
-    db.session.commit()
-    return jsonify({"message":"Redação avaliada"})
+@app.route("/criar_tema", methods=["POST"])
+def criar_tema():
+    if "user_id" not in session or session["user_tipo"] != "professor":
+        return redirect(url_for("login"))
+    titulo = request.form["titulo"]
+    descricao = request.form["descricao"]
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO tema (titulo, descricao) VALUES (%s, %s)", (titulo, descricao))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return redirect(url_for("dashboard"))
 
-if __name__=="__main__":
-    app.run(host="0.0.0.0", port=5000)
+if __name__ == "__main__":
+    app.run(debug=True)
